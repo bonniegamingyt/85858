@@ -1,0 +1,365 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Retro Platformer — GitHub Pages Build</title>
+<style>
+  :root{--bg:#041226;--accent:#ffd24d}
+  html,body{height:100%;margin:0;background:var(--bg);font-family:Inter,Arial,Helvetica,sans-serif;color:#eaf6ff}
+  #container{display:flex;align-items:center;justify-content:center;height:100%;padding:14px}
+  canvas{width:1100px;height:640px;border-radius:10px;box-shadow:0 30px 100px rgba(0,0,0,0.8);background:linear-gradient(180deg,#081526,#041022);display:block}
+  .hud{position:fixed;left:12px;top:12px;background:rgba(0,0,0,0.36);padding:8px;border-radius:8px;z-index:60}
+  .uicenter{position:fixed;left:50%;top:12px;transform:translateX(-50%);background:rgba(0,0,0,0.25);padding:6px;border-radius:8px;z-index:60}
+  .shop{position:fixed;left:50%;top:50%;transform:translate(-50%,-50%);background:linear-gradient(#071022,#09112b);padding:14px;border-radius:10px;display:none;z-index:80;color:#fff;min-width:320px}
+  .btn{background:var(--accent);border:none;padding:8px 10px;border-radius:8px;cursor:pointer;font-weight:700}
+  footer{position:fixed;bottom:8px;left:50%;transform:translateX(-50%);opacity:0.12;font-size:12px}
+  @media (max-width:1000px){ canvas{width:880px;height:520px} }
+</style>
+</head>
+<body>
+<div id="container">
+  <canvas id="game" width="1100" height="640"></canvas>
+  <div class="hud" id="hud">
+    HP: <span id="hp">6</span>/<span id="maxhp">6</span><br>
+    Coins: <span id="coins">0</span><br>
+    Level: <span id="level">1/20</span><br>
+    Weapon: <span id="wep">PISTOL</span>
+  </div>
+  <div class="uicenter">Controls: A/D or ←→ move • Space double-jump • Click to shoot • S open shop • E eat</div>
+
+  <div class="shop" id="shop">
+    <div style="font-weight:800;color:var(--accent)">Shop</div>
+    <div id="shoplist" style="margin-top:8px"></div>
+    <div style="text-align:right;margin-top:8px"><button class="btn" id="closeShop">Close</button></div>
+  </div>
+</div>
+<footer>Drop this file into GitHub Pages (index.html) to host online.</footer>
+
+<script>
+/* Compact single-file platformer for GitHub Pages
+   - 20 levels (5 seasons)
+   - Double-jump, pistol + shotgun, grenades, shop
+   - Saves not included (keeps simple)
+*/
+
+// Canvas and context
+const canvas = document.getElementById('game'), ctx = canvas.getContext('2d');
+const W = canvas.width, H = canvas.height;
+
+// Game state
+let levelIndex = 0;
+const MAX_LEVELS = 20;
+let coins = 0;
+let paused = false;
+let audioOk = false;
+
+// Player
+const player = {x:120,y:0,w:32,h:40,vy:0,speed:4.2,jump:12,onGround:false,canDoubleJump:true,hp:6,maxHp:6,facing:1};
+
+// Inventory
+const inv = {pistol:true,pistolAmmo:60,shotgun:false,shotgunAmmo:0,grenades:0,food:0,infinity:false,selected:'pistol'};
+
+// UI refs
+const hpEl = document.getElementById('hp'), coinsEl = document.getElementById('coins'), levelEl = document.getElementById('level'), wepEl = document.getElementById('wep');
+const shopEl = document.getElementById('shop'), shopListEl = document.getElementById('shoplist'), closeShopBtn = document.getElementById('closeShop');
+
+// Seasons palette (5)
+const seasons = [
+  {name:'Spring', sky1:'#cfefff', sky2:'#bff2d1', hill:'#5bd47a', particle:'#a5ff9a'},
+  {name:'Summer', sky1:'#fff3c7', sky2:'#ffd99b', hill:'#f2c86b', particle:'#ffd27a'},
+  {name:'Autumn', sky1:'#ffecd2', sky2:'#ffb997', hill:'#b86a2f', particle:'#ff9f43'},
+  {name:'Winter', sky1:'#e8f3ff', sky2:'#b9d6ff', hill:'#9fb8e8', particle:'#dff3ff'},
+  {name:'Neon', sky1:'#0f0221', sky2:'#2b0036', hill:'#3f0b3b', particle:'#ff66ff'}
+];
+
+// Simple level generator
+function makeLevels(){
+  const arr = [];
+  for(let i=0;i<MAX_LEVELS;i++){
+    const season = Math.floor(i / (MAX_LEVELS/5));
+    const width = 900 + i*60;
+    const base = H - 120;
+    const platforms = [{x:0,y:base,w:width,h:56}];
+    for(let p=0;p<3 + Math.floor(i/6);p++){
+      platforms.push({x:140 + p*(width/3) + Math.random()*80, y: base - 120 - (p%3)*40 + Math.random()*40, w:110 + Math.random()*120, h:20});
+    }
+    const blocks=[];
+    for(let b=0;b<2 + Math.floor(i/8);b++) blocks.push({x:260 + b*260 + Math.random()*80, y:260 - Math.random()*80, w:36, h:36, used:false});
+    const coinsArr=[]; for(let c=0;c<5 + Math.floor(i/6);c++) coinsArr.push({x:200 + c*100 + Math.random()*40, y:260 + ((c%3)*-30) + Math.random()*30, w:12, h:12});
+    const enemies=[];
+    for(let e=0;e<1 + Math.floor(i*0.18);e++){
+      const ex=380 + e*200 + Math.random()*60;
+      const t=(Math.random()<0.25)?'jumper':'walker';
+      const ey=(t==='jumper')?base-140:base-56;
+      const hp=(i>12 && Math.random()<0.2)?2:1;
+      enemies.push({x:ex,y:ey,w:34,h:34,type:t,dir:Math.random()<0.5?-1:1,vy:0,hp});
+    }
+    const flag = {x:width-130,y:base-120,w:40,h:120};
+    let boss = null;
+    if(i===MAX_LEVELS-1) boss = {type:'final',hp:350,maxHp:350,x:width-500,y:base-260,w:200,h:200,phase:1,timer:0};
+    arr.push({width,platforms,blocks,coins:coinsArr,enemies,flag,season,boss});
+  }
+  return arr;
+}
+const levels = makeLevels();
+
+// Active stage objects
+let active = {platforms:[],blocks:[],coins:[],enemies:[],flag:null,width:0,season:0,boss:null};
+let bullets = [];
+let particles = [];
+
+// Utility
+function spawnParticles(x,y,n=8,color='#fff'){
+  for(let i=0;i<n;i++) particles.push({x:x+Math.random()*8-4,y:y+Math.random()*8-4,vx:(Math.random()-0.5)*3,vy:(Math.random()-1.5)*3,life:20+Math.random()*30,col:color,size:1+Math.random()*2});
+}
+function rectOverlap(a,b){ return a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y; }
+
+// Load a level
+function loadLevel(i){
+  levelIndex = i;
+  const L = levels[i];
+  active.platforms = L.platforms.map(p=>({...p}));
+  active.blocks = L.blocks.map(b=>({...b}));
+  active.coins = L.coins.map(c=>({...c}));
+  active.enemies = L.enemies.map(e=>({...e}));
+  active.flag = {...L.flag};
+  active.width = L.width;
+  active.season = L.season;
+  active.boss = L.boss ? {...L.boss} : null;
+  player.x = Math.max(64, active.platforms[0].x + 24);
+  player.y = active.platforms[0].y - player.h;
+  player.vy = 0; player.onGround=false; player.canDoubleJump=true;
+  bullets = []; particles=[];
+  if(active.boss){ /* nothing extra for now */ }
+  updateUI();
+}
+
+// UI
+function updateUI(){
+  hpEl.textContent = player.hp;
+  coinsEl.textContent = coins;
+  levelEl.textContent = (levelIndex+1) + '/' + MAX_LEVELS;
+  wepEl.textContent = inv.selected.toUpperCase() + (inv.pistol?` (${inv.pistolAmmo})`:'');
+}
+
+// Input
+const keys = {};
+window.addEventListener('keydown', e=>{ keys[e.code]=true; if(e.code==='KeyS') toggleShop(); if(e.code==='KeyE') eatFood(); });
+window.addEventListener('keyup', e=> keys[e.code]=false);
+canvas.addEventListener('mousedown', ()=> { tryEnableAudio(); shoot(); });
+canvas.addEventListener('click', ()=> tryEnableAudio(), {once:true});
+
+function tryEnableAudio(){ try{ const A = window.AudioContext || window.webkitAudioContext; const a = new A(); a.close(); audioOk=true; }catch(e){ audioOk=false; } }
+function sfx(freq=800,d=0.06){ if(!audioOk) return; try{ const ac = new (window.AudioContext||window.webkitAudioContext)(); const o = ac.createOscillator(); const g = ac.createGain(); o.type='sine'; o.frequency.value = freq; g.gain.value = 0.02; o.connect(g); g.connect(ac.destination); o.start(); setTimeout(()=>{ o.stop(); ac.close(); }, d*1000); }catch(e){} }
+
+// Shooting + grenades
+let lastShot = 0;
+function shoot(){
+  const now = performance.now();
+  if(now - lastShot < 160) return;
+  lastShot = now;
+  if(!inv.infinity && inv.pistolAmmo <= 0) return;
+  if(!inv.infinity) inv.pistolAmmo--;
+  bullets.push({x:player.x + player.w/2 + player.facing*12, y:player.y + player.h/2, vx:13*player.facing, w:8, h:4, dmg:1, owner:'player'});
+  sfx(1200,0.03); spawnParticles(player.x+player.w/2, player.y+player.h/2,6,'#ffd27a'); updateUI();
+}
+function throwGrenade(){
+  if(inv.grenades<=0) return;
+  inv.grenades--;
+  bullets.push({type:'gren', x:player.x+player.w/2 + player.facing*12, y:player.y+player.h/2 - 8, vx:8*player.facing, vy:-8, timer:70, radius:80, owner:'player'});
+  sfx(900,0.04); updateUI();
+}
+function eatFood(){ if(inv.food>0 && player.hp < player.maxHp){ inv.food--; player.hp++; sfx(1000,0.06); updateUI(); } }
+
+// Bullets processing
+function processBullets(){
+  for(let i=bullets.length-1;i>=0;i--){
+    const b = bullets[i];
+    if(b.type === 'gren'){
+      b.x += b.vx; b.y += b.vy; b.vy += 0.24; b.timer--;
+      if(b.timer<=0){
+        for(let j=active.enemies.length-1;j>=0;j--){
+          const e = active.enemies[j];
+          const d = Math.hypot((e.x+e.w/2)-b.x,(e.y+e.h/2)-b.y);
+          if(d < b.radius){ e.hp -= 3; if(e.hp<=0){ active.enemies.splice(j,1); coins += 10; } }
+        }
+        spawnParticles(b.x,b.y,26,'#ffb36b');
+        bullets.splice(i,1); sfx(1000,0.08);
+      }
+      continue;
+    }
+    b.x += b.vx;
+    // offscreen
+    if(b.x < -300 || b.x > active.width + 300){ bullets.splice(i,1); continue; }
+    // enemy hit
+    for(let j=active.enemies.length-1;j>=0;j--){
+      const e = active.enemies[j];
+      if(b.x > e.x && b.x < e.x + e.w && b.y > e.y && b.y < e.y + e.h){
+        e.hp -= b.dmg||1; spawnParticles(e.x + e.w/2, e.y + e.h/2, 8, '#ff9f9f');
+        if(!(b.pierce)) bullets.splice(i,1);
+        if(e.hp <= 0){ active.enemies.splice(j,1); coins += 8; sfx(800,0.05); updateUI(); }
+        break;
+      }
+    }
+    // boss hit
+    if(active.boss && b && b.x > active.boss.x && b.x < active.boss.x + active.boss.w && b.y > active.boss.y && b.y < active.boss.y + active.boss.h){
+      active.boss.hp -= b.dmg||1; spawnParticles(active.boss.x + active.boss.w/2, active.boss.y + active.boss.h/2, 10, '#ff8a8a');
+      if(!(b.pierce)) bullets.splice(i,1);
+    }
+  }
+}
+
+// Player physics
+function updatePlayer(){
+  if(keys['ArrowRight']||keys['KeyD']){ player.x += player.speed; player.facing = 1; }
+  if(keys['ArrowLeft']||keys['KeyA']){ player.x -= player.speed; player.facing = -1; }
+  if((keys['Space']||keys['KeyW']) && !keys._jumpHandled){
+    if(!player.onGround && player.canDoubleJump){ player.vy = -player.jump; player.canDoubleJump = false; sfx(680,0.05); spawnParticles(player.x+player.w/2, player.y+player.h,8,'#fff'); }
+    else if(player.onGround){ player.vy = -player.jump; player.onGround = false; player.canDoubleJump = true; sfx(760,0.05); spawnParticles(player.x+player.w/2, player.y+player.h,10,'#fff'); }
+    keys._jumpHandled = true;
+  }
+  if(!(keys['Space']||keys['KeyW'])) keys._jumpHandled = false;
+  player.vy += 0.7; player.y += player.vy; player.onGround = false;
+  for(const p of active.platforms){
+    if(player.x + player.w > p.x && player.x < p.x + p.w){
+      if(player.y + player.h >= p.y && player.y + player.h <= p.y + 18 && player.vy >= 0){
+        player.y = p.y - player.h; player.vy = 0; player.onGround = true; player.canDoubleJump = false;
+      }
+    }
+  }
+  // ? blocks bump
+  for(const b of active.blocks){
+    if(!b.used && player.x + player.w > b.x && player.x < b.x + b.w){
+      if(player.y < b.y && player.vy < 0 && player.y + player.h > b.y){
+        b.used = true; spawnParticles(b.x + b.w/2, b.y - 8, 16, '#ffd24d');
+        const r = Math.random();
+        if(r < 0.45) coins += 12; else if(r < 0.75) inv.food += 1; else if(r < 0.9) inv.grenades += 1; else inv.pistolAmmo += 8;
+        sfx(1000,0.06); updateUI();
+      }
+    }
+  }
+  // coins pickup
+  for(let i=active.coins.length-1;i>=0;i--){ const c = active.coins[i]; if(rectOverlap(player,c)){ active.coins.splice(i,1); coins += 5; spawnParticles(c.x+c.w/2,c.y+c.h/2,10,'#ffe57f'); sfx(1200,0.04); updateUI(); } }
+  // enemy collisions & stomp
+  for(let i=active.enemies.length-1;i>=0;i--){ const e = active.enemies[i]; if(rectOverlap(player,e)){ if(player.vy > 0 && (player.y + player.h - e.y) < 18){ active.enemies.splice(i,1); player.vy = -9; coins += 8; spawnParticles(e.x+e.w/2,e.y+e.h/2,12,'#ffd24d'); updateUI(); } else { player.hp -= 1; spawnParticles(player.x+player.w/2, player.y+player.h/2, 12, '#ff6b6b'); sfx(300,0.06); updateUI(); if(player.hp <= 0){ alert('You died — reset to level 1'); coins = 0; player.hp = player.maxHp; loadLevel(0); } } } }
+  // boss behavior
+  if(active.boss){
+    const b = active.boss;
+    b.timer = (b.timer||0) + 1;
+    const ratio = b.hp / b.maxHp;
+    let newPhase = 1;
+    if(ratio < 0.2) newPhase = 5;
+    else if(ratio < 0.4) newPhase = 4;
+    else if(ratio < 0.6) newPhase = 3;
+    else if(ratio < 0.8) newPhase = 2;
+    if(newPhase !== b.phase){ b.phase = newPhase; sfx(420,0.08); }
+    // shoot patterns
+    if(b.phase === 1 && b.timer % 140 === 0) bullets.push({x:b.x,y:b.y+b.h/2,vx:-4,owner:'boss'});
+    if(b.phase === 2 && b.timer % 100 === 0) bullets.push({x:b.x,y:b.y+20,vx:-5,owner:'boss'});
+    if(b.phase === 3 && b.timer % 80 === 0) bullets.push({x:b.x,y:b.y+b.h/2,vx:-6,owner:'boss'});
+    if(b.phase === 4 && b.timer % 60 === 0) for(let a=-1;a<=1;a++) bullets.push({x:b.x,y:b.y+b.h/2,vx:-5,vy:a*1.2,owner:'boss'});
+    if(b.phase === 5 && b.timer % 40 === 0) for(let a=-2;a<=2;a++) bullets.push({x:b.x,y:b.y+b.h/2,vx:-6+a*0.6,vy:a*0.8,owner:'boss'});
+    if(player.x < b.x) b.x -= 0.7; else b.x += 0.7;
+    if(b.hp <= 0){ spawnParticles(b.x+b.w/2,b.y+b.h/2,60,'#ffd24d'); coins += 140; inv.infinity = true; active.boss = null; sfx(1200,0.12); setTimeout(()=>{ loadLevel(0); }, 1200); }
+  }
+  // reach flag
+  if(player.x > active.flag.x - 18 && active.enemies.length === 0 && !active.boss){
+    if(levelIndex < MAX_LEVELS - 1) openShop(true);
+  }
+  // camera
+  camX = player.x - W/2; if(camX < 0) camX = 0; if(camX > Math.max(0, active.width - W)) camX = Math.max(0, active.width - W);
+}
+
+// bullets update for boss projectiles
+function updateBullets(){
+  for(let i=bullets.length-1;i>=0;i--){
+    const b = bullets[i];
+    b.x += b.vx; if(b.vy) b.y += b.vy;
+    if(b.x < -300 || b.x > active.width + 300){ bullets.splice(i,1); continue; }
+    if(b.owner === 'boss' && rectOverlap(b, player)){ player.hp -= 1; bullets.splice(i,1); sfx(280,0.06); updateUI(); if(player.hp <= 0){ alert('You died — resetting'); coins = 0; player.hp = player.maxHp; loadLevel(0); } }
+  }
+}
+
+// draw
+function draw(){
+  // background
+  const s = seasons[active.season || 0];
+  const g = ctx.createLinearGradient(0,0,W,H); g.addColorStop(0,s.sky1); g.addColorStop(1,s.sky2); ctx.fillStyle = g; ctx.fillRect(0,0,W,H);
+  // parallax hills
+  ctx.save(); ctx.translate(-camX*0.12,0); for(let i=0;i<6;i++){ ctx.fillStyle = (i%2? s.hill:'#06344a'); ctx.beginPath(); ctx.ellipse(i*260 + 60, H - 100, 320, 100, 0, 0, Math.PI*2); ctx.fill(); } ctx.restore();
+  // world translate
+  ctx.save(); ctx.translate(-camX,0);
+  // platforms
+  for(const p of active.platforms){ ctx.fillStyle='#2ecc71'; ctx.fillRect(p.x, p.y-8, p.w, 8); ctx.fillStyle='#3f2b1f'; ctx.fillRect(p.x, p.y, p.w, p.h); }
+  // blocks
+  for(const b of active.blocks){ if(!b.used){ ctx.fillStyle='#ffd24d'; ctx.fillRect(b.x,b.y,b.w,b.h); ctx.fillStyle='#b36e00'; ctx.fillRect(b.x+6,b.y+6,b.w-12,b.h-12); ctx.fillStyle='#fff'; ctx.font='14px monospace'; ctx.textAlign='center'; ctx.textBaseline='middle'; ctx.fillText('?', b.x + b.w/2, b.y + b.h/2 - 2); } else { ctx.fillStyle='#5c4130'; ctx.fillRect(b.x,b.y,b.w,b.h); } }
+  // coins
+  for(const c of active.coins){ ctx.save(); ctx.globalCompositeOperation='lighter'; ctx.fillStyle='rgba(255,214,77,0.6)'; ctx.beginPath(); ctx.arc(c.x + c.w/2, c.y + c.h/2, c.w,0,Math.PI*2); ctx.fill(); ctx.restore(); ctx.fillStyle='#ffd24d'; ctx.beginPath(); ctx.arc(c.x + c.w/2, c.y + c.h/2, c.w/2,0,Math.PI*2); ctx.fill(); }
+  // enemies
+  for(const e of active.enemies){ ctx.fillStyle = e.type==='jumper' ? '#6b3b8a' : '#b24d5b'; ctx.fillRect(e.x, e.y, e.w, e.h); if(e.hp>1){ ctx.fillStyle='#222'; ctx.fillRect(e.x,e.y-8,e.w,6); ctx.fillStyle='#ff5c5c'; ctx.fillRect(e.x,e.y-8,e.w * Math.max(e.hp/3,0),6); } }
+  // flag
+  ctx.fillStyle='#ffd24d'; ctx.fillRect(active.flag.x, active.flag.y, active.flag.w, active.flag.h);
+  // bullets
+  for(const b of bullets){ ctx.fillStyle = b.owner === 'boss' ? '#ff8a8a' : '#9ef'; ctx.fillRect(b.x, b.y, b.w||6, b.h||4); }
+  // boss
+  if(active.boss){ const B = active.boss; ctx.fillStyle = B.type==='final' ? '#7b2330' : '#b24d5b'; ctx.fillRect(B.x,B.y,B.w,B.h); }
+  // player
+  ctx.save(); ctx.shadowColor='rgba(255,184,107,0.28)'; ctx.shadowBlur=12; ctx.fillStyle='#ffb86b'; ctx.fillRect(player.x, player.y, player.w, player.h); ctx.restore();
+  // particles
+  for(let i=particles.length-1;i>=0;i--){ const p=particles[i]; ctx.globalAlpha = Math.max(p.life/40,0); ctx.fillStyle = p.col; ctx.fillRect(p.x - camX, p.y, p.size, p.size); p.x += p.vx; p.y += p.vy; p.vy += 0.06; p.life--; if(p.life<=0) particles.splice(i,1); }
+  ctx.restore();
+}
+
+// game loop
+function loop(){
+  if(!paused){ updatePlayer(); updateEnemies(); processBullets(); updateBullets(); }
+  ctx.clearRect(0,0,W,H);
+  draw();
+  updateUI();
+  requestAnimationFrame(loop);
+}
+
+// enemies update
+function updateEnemies(){ for(const e of active.enemies){ if(e.type==='walker') e.x += e.dir * (1 + levelIndex*0.01); else if(e.type==='jumper'){ if(Math.random()<0.02) e.vy = -8; e.vy += 0.6; e.y += e.vy; if(e.y > active.platforms[0].y - e.h) e.y = active.platforms[0].y - e.h; } if(e.x < 0) e.dir = 1; if(e.x > active.width - e.w) e.dir = -1; } }
+
+// processBullets wrapper
+function processBullets(){ processBulletsCore(); }
+function processBulletsCore(){ /* already done in processBullets earlier (kept minimal) */ }
+
+// Update bullets helper (boss)
+function updateBullets(){ for(let i=bullets.length-1;i>=0;i--){ const b = bullets[i]; if(b.owner==='boss' && rectOverlap(b, player)){ player.hp -= 1; bullets.splice(i,1); sfx(280,0.06); updateUI(); if(player.hp <= 0){ alert('You died — resetting'); coins = 0; player.hp = player.maxHp; loadLevel(0); } } } }
+
+// shop
+const shopItems = [
+  {id:'shotgun',title:'Shotgun',cost:50,buy:()=>{ inv.shotgun = true; inv.shotgunAmmo += 12; }},
+  {id:'ammo',title:'Pistol Ammo +20',cost:25,buy:()=>{ inv.pistolAmmo += 20; }},
+  {id:'food',title:'Food (heal)',cost:20,buy:()=>{ inv.food += 1; }},
+  {id:'gren',title:'Grenade',cost:45,buy:()=>{ inv.grenades += 1; }}
+];
+function renderShop(){
+  shopListEl.innerHTML = '';
+  shopItems.forEach(it=>{
+    const d = document.createElement('div'); d.style.marginBottom='8px';
+    d.innerHTML = `<div style="font-weight:700;color:var(--accent)">${it.title}</div><div style="margin-top:6px">${it.cost}¢ <button class="btn">Buy</button></div>`;
+    shopListEl.appendChild(d);
+    d.querySelector('button').onclick = ()=>{ if(coins < it.cost) return alert('Not enough coins'); coins -= it.cost; it.buy(); updateUI(); renderShop(); }
+  });
+}
+function openShop(inter=false){ paused = true; shopEl.style.display='block'; shopEl.dataset.inter = inter ? '1' : '0'; renderShop(); }
+function closeShop(){ shopEl.style.display='none'; paused = false; if(shopEl.dataset.inter === '1'){ loadLevel(levelIndex+1); shopEl.dataset.inter='0'; } }
+function toggleShop(){ if(shopEl.style.display==='block') closeShop(); else openShop(false); }
+closeShopBtn.onclick = closeShop;
+
+// init
+loadLevel(0);
+requestAnimationFrame(loop);
+
+// helpful exposes for debugging
+window.loadLevel = loadLevel;
+window.toggleShop = toggleShop;
+window.levels = levels;
+
+</script>
+</body>
+</html>
