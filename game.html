@@ -1,0 +1,274 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Retro Platformer Arcade Ultra</title>
+  <style>
+    body { margin:0; background:#000; color:white; font-family:sans-serif; }
+    canvas { display:block; background:#111; margin:0 auto; }
+    #ui { position:absolute; top:10px; left:10px; color:white; font-family:monospace; }
+    #shop { position:absolute; top:50px; left:50%; transform:translateX(-50%);
+            padding:10px; background:#222; border:2px solid #fff; display:none; color:white; }
+    button { margin:4px; padding:6px 10px; font-size:14px; }
+  </style>
+</head>
+<body>
+  <canvas id="gameCanvas" width="960" height="540"></canvas>
+  <div id="ui"></div>
+  <div id="shop"></div>
+<script>
+// =============================================================
+// Retro Platformer Arcade Ultra
+// =============================================================
+
+const canvas = document.getElementById("gameCanvas");
+const ctx = canvas.getContext("2d");
+const ui = document.getElementById("ui");
+const shopDiv = document.getElementById("shop");
+
+let keys = {};
+document.addEventListener("keydown", e=>{ keys[e.key]=true; if(e.key==="s") toggleShop(); });
+document.addEventListener("keyup", e=>{ keys[e.key]=false; });
+
+let player = {x:100,y:400,w:32,h:32,vx:0,vy:0,facing:1,jumps:2,hp:5,maxHp:5};
+let gravity = 0.6;
+let onGround=false;
+
+let coins=0;
+let inv = {pistolAmmo:20, grenades:2, food:1, infinity:false};
+let bullets=[];
+let particles=[];
+let lastShot=0;
+
+let active=null;
+let currentLevel=0;
+
+// Levels
+const levels = [];
+function makeLevel(theme){
+  return {
+    width:960, height:540,
+    platforms:[{x:0,y:500,w:960,h:40},{x:300,y:400,w:120,h:20},{x:600,y:350,w:120,h:20}],
+    enemies:[{x:500,y:470,w:30,h:30,hp:3},{x:200,y:470,w:30,h:30,hp:3}],
+    boss:null,
+    blocks:[{x:350,y:370,w:32,h:32,type:"coin"},{x:650,y:320,w:32,h:32,type:"food"}],
+    theme
+  };
+}
+levels.push(makeLevel("spring"));
+levels.push(makeLevel("summer"));
+levels.push(makeLevel("fall"));
+levels.push(makeLevel("winter"));
+levels.push({width:960,height:540,platforms:[{x:0,y:500,w:960,h:40}],
+             enemies:[],boss:{x:700,y:440,w:60,h:60,hp:40},blocks:[],theme:"boss"});
+
+function loadLevel(n){
+  currentLevel=n; active=JSON.parse(JSON.stringify(levels[n]));
+  player.x=100; player.y=400; player.vx=0; player.vy=0; player.hp=player.maxHp;
+}
+loadLevel(0);
+
+// Input helpers
+function isDown(k){ return keys[k]||keys[k.toLowerCase()]; }
+
+// Shop
+function toggleShop(){
+  if(shopDiv.style.display==="block"){ shopDiv.style.display="none"; return; }
+  let html="<h3>Shop</h3>";
+  html+=`<p>Coins: ${coins}</p>`;
+  html+=`<button onclick="buy('ammo')">Ammo (10c)</button>`;
+  html+=`<button onclick="buy('grenade')">Grenade (25c)</button>`;
+  html+=`<button onclick="buy('food')">Food (15c)</button>`;
+  html+=`<button onclick="buy('infinity')">Infinity Ammo (200c)</button>`;
+  shopDiv.innerHTML=html;
+  shopDiv.style.display="block";
+}
+function buy(item){
+  if(item==="ammo" && coins>=10){ coins-=10; inv.pistolAmmo+=20; }
+  if(item==="grenade" && coins>=25){ coins-=25; inv.grenades++; }
+  if(item==="food" && coins>=15){ coins-=15; inv.food++; }
+  if(item==="infinity" && coins>=200){ coins-=200; inv.infinity=true; }
+  toggleShop(); updateUI();
+}
+
+// Shooting
+function shoot(){
+  const now=performance.now();
+  if(now-lastShot<180) return;
+  lastShot=now;
+  if(!inv.infinity && inv.pistolAmmo<=0) return;
+  if(!inv.infinity) inv.pistolAmmo--;
+  bullets.push({x:player.x+player.w/2+player.facing*16,
+                y:player.y+player.h/2,
+                vx:13*player.facing,vy:0,w:8,h:4,dmg:1,owner:"player"});
+  sfx(1200,0.03);
+  spawnParticles(player.x+player.w/2, player.y+player.h/2, 6, "#ffd27a");
+  updateUI();
+}
+function throwGrenade(){
+  if(inv.grenades<=0) return;
+  inv.grenades--;
+  bullets.push({type:"gren",x:player.x+player.w/2,y:player.y,vx:6*player.facing,vy:-8,
+                timer:60,radius:80,owner:"player"});
+  sfx(900,0.05);
+  updateUI();
+}
+
+// Update bullets
+function updateBullets(){
+  for(let i=bullets.length-1;i>=0;i--){
+    const b=bullets[i];
+    if(b.type==="gren"){
+      b.x+=b.vx; b.y+=b.vy; b.vy+=0.35; b.timer--;
+      if(b.timer<=0){
+        spawnParticles(b.x,b.y,30,"#ff944d"); sfx(400,0.1);
+        // damage enemies
+        for(let j=active.enemies.length-1;j>=0;j--){
+          const e=active.enemies[j];
+          const d=Math.hypot((e.x+e.w/2)-b.x,(e.y+e.h/2)-b.y);
+          if(d<b.radius){ e.hp-=3; if(e.hp<=0){ active.enemies.splice(j,1); coins+=10; } }
+        }
+        if(active.boss){
+          const d=Math.hypot((active.boss.x+active.boss.w/2)-b.x,(active.boss.y+active.boss.h/2)-b.y);
+          if(d<b.radius) active.boss.hp-=8;
+        }
+        bullets.splice(i,1); continue;
+      }
+    } else {
+      b.x+=b.vx;
+      if(b.x<-200||b.x>active.width+200){ bullets.splice(i,1); continue; }
+      if(b.owner==="player"){
+        for(let j=active.enemies.length-1;j>=0;j--){
+          const e=active.enemies[j];
+          if(rectOverlap(b,e)){
+            e.hp-=b.dmg;
+            spawnParticles(e.x+e.w/2,e.y+e.h/2,8,"#ff8888");
+            bullets.splice(i,1);
+            if(e.hp<=0){ active.enemies.splice(j,1); coins+=8; sfx(800,0.05); }
+            break;
+          }
+        }
+        if(active.boss && rectOverlap(b,active.boss)){
+          active.boss.hp-=b.dmg;
+          spawnParticles(b.x,b.y,10,"#ff4444");
+          bullets.splice(i,1);
+        }
+      }
+    }
+  }
+}
+
+// Rect overlap
+function rectOverlap(a,b){
+  return a.x<a.x+a.w && a.x+a.w>b.x && a.y<b.y+b.h && a.y+a.h>b.y;
+}
+
+// Particles
+function spawnParticles(x,y,n,color){
+  for(let i=0;i<n;i++){
+    particles.push({x,y,vx:(Math.random()-0.5)*4,vy:(Math.random()-0.5)*4,
+                    life:20,color});
+  }
+}
+function updateParticles(){
+  for(let i=particles.length-1;i>=0;i--){
+    const p=particles[i]; p.x+=p.vx; p.y+=p.vy; p.life--; if(p.life<=0) particles.splice(i,1);
+  }
+}
+
+// SFX
+function sfx(freq,len){
+  const ctx=new AudioContext(); const o=ctx.createOscillator(); const g=ctx.createGain();
+  o.type="square"; o.frequency.value=freq; o.connect(g); g.connect(ctx.destination);
+  o.start(); g.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime+len); o.stop(ctx.currentTime+len);
+}
+
+// UI
+function updateUI(){
+  ui.innerText=`HP:${player.hp}/${player.maxHp} Coins:${coins} Ammo:${inv.infinity?"∞":inv.pistolAmmo} Gren:${inv.grenades} Food:${inv.food}`;
+}
+
+// Main update
+function update(){
+  // movement
+  player.vx=(isDown("ArrowRight")||isDown("d")?3:0)-(isDown("ArrowLeft")||isDown("a")?3:0);
+  if(isDown(" ")&&player.jumps>0&&(!keys._jumping)){ player.vy=-10; player.jumps--; keys._jumping=true; }
+  if(!isDown(" ")) keys._jumping=false;
+  player.vy+=gravity; player.x+=player.vx; player.y+=player.vy;
+
+  // collisions
+  onGround=false;
+  for(const p of active.platforms){
+    if(player.x< p.x+p.w && player.x+player.w>p.x &&
+       player.y< p.y+p.h && player.y+player.h>p.y){
+      if(player.vy>0){ player.y=p.y-player.h; player.vy=0; onGround=true; player.jumps=2; }
+    }
+  }
+
+  // controls
+  if(isDown("f")) shoot();
+  if(isDown("g")) throwGrenade();
+  if(isDown("e") && inv.food>0 && player.hp<player.maxHp){
+    inv.food--; player.hp=Math.min(player.maxHp,player.hp+2); updateUI();
+  }
+
+  // enemies
+  for(let e of active.enemies){
+    e.x+=Math.sin(Date.now()/500)*0.3;
+  }
+
+  // blocks
+  for(let i=active.blocks.length-1;i>=0;i--){
+    const b=active.blocks[i];
+    if(rectOverlap(player,b)){
+      if(b.type==="coin"){ coins+=5; sfx(1500,0.05); }
+      if(b.type==="food"){ inv.food++; }
+      active.blocks.splice(i,1); updateUI();
+    }
+  }
+
+  updateBullets();
+  updateParticles();
+
+  // boss
+  if(active.boss && active.boss.hp<=0){ alert("Boss defeated!"); loadLevel((currentLevel+1)%levels.length); }
+}
+
+// Draw
+function draw(){
+  ctx.fillStyle={spring:"#66cc66",summer:"#ccaa66",fall:"#cc6633",winter:"#99ccff",boss:"#222"}[active.theme]||"#111";
+  ctx.fillRect(0,0,canvas.width,canvas.height);
+
+  ctx.fillStyle="#888";
+  for(const p of active.platforms){ ctx.fillRect(p.x,p.y,p.w,p.h); }
+
+  ctx.fillStyle="gold";
+  for(const b of active.blocks){ ctx.fillRect(b.x,b.y,b.w,b.h); }
+
+  ctx.fillStyle="red";
+  for(const e of active.enemies){ ctx.fillRect(e.x,e.y,e.w,e.h); }
+
+  if(active.boss){
+    ctx.fillStyle="purple"; ctx.fillRect(active.boss.x,active.boss.y,active.boss.w,active.boss.h);
+    ctx.fillStyle="white"; ctx.fillText("Boss HP:"+active.boss.hp, active.boss.x, active.boss.y-10);
+  }
+
+  ctx.fillStyle="white";
+  ctx.fillRect(player.x,player.y,player.w,player.h);
+
+  ctx.fillStyle="yellow";
+  for(const b of bullets){ ctx.fillRect(b.x,b.y,b.w||6,b.h||6); }
+
+  for(const p of particles){
+    ctx.fillStyle=p.color; ctx.fillRect(p.x,p.y,2,2);
+  }
+}
+
+function loop(){
+  update(); draw(); requestAnimationFrame(loop);
+}
+updateUI(); loop();
+
+</script>
+</body>
+</html>
